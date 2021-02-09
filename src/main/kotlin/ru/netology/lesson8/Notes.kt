@@ -5,13 +5,13 @@ import java.lang.RuntimeException
 import java.util.concurrent.atomic.AtomicInteger
 
 open class Notes(val userId: Int) {
+    protected open val canComment   = false
     private val mutex               = Mutex()
     private var idGenerator         = AtomicInteger()
     private fun generateId() : Int  = idGenerator.incrementAndGet()
-    protected var notes             = sortedMapOf<Int,Note>()
-    protected open fun dropNoteComments(noteId : Int) {
-        TODO("NotesWithComments implements")
-    }
+    protected var notes             = sortedMapOf<Int,NoteData>()
+    //в данном классе функция ничего не делает. Будет переопределена в наследнике
+    protected open fun dropNoteComments(noteId : Int) = Unit
 
     /**
      * Создает новую заметку у текущего пользователя.
@@ -22,8 +22,9 @@ open class Notes(val userId: Int) {
             privacyComment : Array<String> = emptyArray()) : Int
     {
         val id = generateId()
-        mutex.lock()
-            notes[id] = NoteData(note = Note(id = id, ownerId = userId, title = title, text = text),
+        mutex.lock()  //id считаем как время, потому что и то и другое увеличивается с номером поста
+            notes[id] = NoteData(note = Note(id = id, ownerId = userId, title = title, text = text,
+                                 date = id, canComment = canComment),
                                  privacyView = privacyView, privacyComment = privacyComment)
         mutex.unlock()
         return id
@@ -35,7 +36,7 @@ open class Notes(val userId: Int) {
      */
     fun delete(noteId : Int) : Int
     {
-        //удаляем безвозврато комментарии на заметку
+        //удаляем безвозвратно комментарии на заметку
         dropNoteComments(noteId)
         mutex.lock()
         try {
@@ -59,7 +60,6 @@ open class Notes(val userId: Int) {
         mutex.lock()
         try {
             val note = notes[noteId] ?: throw NoteNotFoundException(noteId)
-            note as NoteData
             if (note.checkPrivacy(privacyView = privacyView, privacyComment = privacyComment))
             {
                 notes[noteId] = note.copy(note.copy(title = title, text = text))
@@ -77,7 +77,7 @@ open class Notes(val userId: Int) {
      * noteIds - идентификаторы заметок, информацию о которых необходимо получить
      * userId  - идентификатор пользователя, информацию о заметках которого требуется получить
      * offset  - смещение, необходимое для выборки определенного подмножества заметок
-     * count   - количество заметок, информацию о которых необходимо получит
+     * count   - количество заметок, информацию о которых необходимо получить
      * sort    - сортировка результатов (0 — по дате создания в порядке убывания, 1 - по дате создания в порядке возрастания).
      */
     fun get(noteIds : Iterable<Int>, userId : Int = this.userId,
@@ -85,14 +85,22 @@ open class Notes(val userId: Int) {
     {
         mutex.lock()
             try{
-                return if (sort)
-                    notes.filterKeys{ noteIds.contains(it) }.flatMap { listOf(it.value) }.
-                        sortedBy { (it as CommentData).date }.subList(offset, offset + count)
-
-                else
-                    notes.filterKeys{ noteIds.contains(it) }.flatMap { listOf(it.value) }.
-                        sortedByDescending { (it as CommentData).date }.subList(offset, offset + count)
-                         
+                if (this.userId != userId)  throw WrongNoteAuthorException(userId, this.userId)
+                val fullList = if (sort) {
+                    notes.filterKeys { noteIds.contains(it) }.flatMap { listOf(it.value) }.sortedBy { it.date }
+                } else {
+                    notes.filterKeys { noteIds.contains(it) }.flatMap { listOf(it.value) }
+                        .sortedByDescending { it.date }
+                }
+               //subList генерит исключения при неверном индексе
+                return if (offset + count <= fullList.size)
+                    {
+                        fullList.subList(offset, offset + count)
+                    } else {
+                        if (offset < fullList.size) {
+                            fullList.subList(offset, fullList.size - offset)
+                        }else listOf()
+                    }
             }
             finally {
                 mutex.unlock()
@@ -107,6 +115,7 @@ open class Notes(val userId: Int) {
     {
         mutex.lock()
         try {
+            if (this.userId != ownerId)  throw WrongNoteAuthorException(ownerId, userId)
             return arrayListOf(GetIdNote(notes[noteId] ?: throw NoteNotFoundException(noteId)))
         }
         finally {
@@ -119,9 +128,9 @@ class NoteNotFoundException         (id : Int) : RuntimeException("Note with id=
 class InsufficientPermissionsForEdit(id : Int) : RuntimeException("Insufficient Permissions for edit Note $id")
 
 class NoteData(
-        note           : Note,
-    val privacyView    : Array<String> = emptyArray(),
-    val privacyComment : Array<String> = emptyArray()
+    note           : Note,
+    val privacyView    : Array<String> = arrayOf("all"),
+    val privacyComment : Array<String> = arrayOf("all")
 ) : Note(
     id = note.id,
     ownerId = note.ownerId,
@@ -135,11 +144,11 @@ class NoteData(
 {
     fun checkPrivacy(privacyView : Array<String>, privacyComment : Array<String>) : Boolean
     {
-        return this.privacyView == privacyView && this.privacyComment == privacyComment
+        return this.privacyView    contentEquals privacyView    &&
+               this.privacyComment contentEquals privacyComment
     }
 
     fun copy(note : Note = this,
-             date           : Int = this.date,
              privacyView    : Array<String> = this.privacyComment,
              privacyComment : Array<String> = this.privacyComment): NoteData
     {

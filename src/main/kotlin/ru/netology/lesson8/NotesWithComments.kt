@@ -4,7 +4,7 @@ import sun.awt.Mutex
 import java.lang.RuntimeException
 import java.util.concurrent.atomic.AtomicInteger
 
-class NotesWithComments(userId: Int) : Notes(userId)
+class NotesWithComments(userId: Int, override val canComment: Boolean = true) : Notes(userId)
 {
     private val mutex               = Mutex()
     private var idGenerator         = AtomicInteger()
@@ -26,7 +26,7 @@ class NotesWithComments(userId: Int) : Notes(userId)
      * Добавляет новый комментарий к заметке.
      * После успешного выполнения возвращает идентификатор созданного комментария (cid).
      */
-    fun createComment( noteId  : Int = 0, //идентификатор заметки. положительное число, обязательный параметр
+    fun createComment( noteId  : Int, //идентификатор заметки. положительное число, обязательный параметр
                        ownerId : Int = userId, //идентификатор владельца заметки положительное число, по умолчанию идентификатор
                                           // текущего пользователя
                        replyTo : Int = 0, //идентификатор пользователя, ответом на комментарий которого является
@@ -37,9 +37,11 @@ class NotesWithComments(userId: Int) : Notes(userId)
                      ) : Int
     {
         mutex.lock()
-        try {
-            comments.values.find { (it as CommentData).guid == guid }
-                                   ?: throw CommentAlreadyExistsException(message, guid)
+        try {  //проверка по guid, что такоего еще не было
+            val dupleComment = comments.values.find { (it as CommentData).guid == guid }
+            if (dupleComment != null)
+                throw CommentAlreadyExistsException(message, guid)
+
             notes[noteId].apply {
                 this ?:               throw NoteNotFoundException(noteId)
                 if (!this.canComment) throw ForbiddenToComment(noteId)
@@ -48,8 +50,8 @@ class NotesWithComments(userId: Int) : Notes(userId)
 
             generateId().apply {
                 comments[this] = CommentData(
-                    Comment(id = this, nid = noteId, oid = ownerId,
-                            replyTo = replyTo, message = message), guid = guid)
+                    Comment(id = this, nid = noteId, oid = ownerId,   //дата = id для простоты
+                            replyTo = replyTo, message = message, date = this), guid = guid)
                 return this
             }
         }
@@ -110,13 +112,22 @@ class NotesWithComments(userId: Int) : Notes(userId)
     {
         mutex.lock()
         try{
-            return if (sort)
-                comments.filter { noteId == it.value.nid }.flatMap { listOf(it.value) }.sortedBy { it.date }.
-                    subList(offset, offset + count).toTypedArray()
-            else
-                comments.filter{ noteId == it.value.nid }.flatMap { listOf(it.value) }.sortedByDescending { it.date }.
-                    subList(offset, offset + count).toTypedArray()
-        }
+            if (ownerId != userId)  throw WrongNoteAuthorException(ownerId, userId)
+            val fullList = if (sort) {
+                comments.filter { noteId == it.value.nid }.flatMap { listOf(it.value) }.sortedBy { it.date }
+            } else {
+                comments.filter { noteId == it.value.nid }.flatMap { listOf(it.value) }.sortedByDescending { it.date }
+            }
+            //subList генерит исключения при неверном индексе
+            return if (offset + count <= fullList.size)
+                {
+                    fullList.subList(offset, offset + count).toTypedArray()
+                } else {
+                    if (offset < fullList.size) {
+                        fullList.subList(offset, fullList.size - offset).toTypedArray()
+                    }else arrayOf()
+                }
+         }
         finally {
             mutex.unlock()
         }
